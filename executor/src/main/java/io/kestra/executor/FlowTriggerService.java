@@ -3,9 +3,9 @@ package io.kestra.executor;
 import java.time.ZonedDateTime;
 import java.util.*;
 import java.util.function.Predicate;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import io.kestra.core.exceptions.IllegalVariableEvaluationException;
 import io.kestra.core.exceptions.InternalException;
 import io.kestra.core.exceptions.KestraRuntimeException;
 import io.kestra.core.models.executions.Execution;
@@ -14,6 +14,7 @@ import io.kestra.core.models.flows.Flow;
 import io.kestra.core.models.flows.FlowWithException;
 import io.kestra.core.models.flows.FlowWithSource;
 import io.kestra.core.models.triggers.AbstractTrigger;
+import io.kestra.core.models.triggers.multipleflows.Condition;
 import io.kestra.core.models.triggers.multipleflows.MultipleCondition;
 import io.kestra.core.models.triggers.multipleflows.MultipleConditionStateStore;
 import io.kestra.core.models.triggers.multipleflows.MultipleConditionWindow;
@@ -107,7 +108,8 @@ public class FlowTriggerService {
                     runContextFactory.of(resolved, execution),
                     resolved,
                     execution,
-                    executionOutputs
+                    executionOutputs,
+                    f.getWhenError()
                 )
             )
             .filter(Optional::isPresent)
@@ -142,7 +144,21 @@ public class FlowTriggerService {
 
         Map<String, Object> executionOutputs = executionOutputs(execution);
 
+        // a trigger-level `when` that could not be rendered fails the execution right away, without opening a window
+        List<Execution> failedForWhenError = flowWithFlowTriggers.stream()
+            .filter(flowWithFlowTrigger -> flowWithFlowTrigger.getWhenError() != null)
+            .flatMap(flowWithFlowTrigger -> flowWithFlowTrigger.getTrigger().evaluate(
+                Optional.empty(),
+                runContextFactory.of(resolved, execution),
+                resolved,
+                execution,
+                null,
+                flowWithFlowTrigger.getWhenError()
+            ).stream())
+            .toList();
+
         List<Execution> executions = flowWithFlowTriggers.stream()
+            .filter(flowWithFlowTrigger -> flowWithFlowTrigger.getWhenError() == null)
             .flatMap(
                 flowWithFlowTrigger -> Optional.ofNullable(flowWithFlowTrigger.getTrigger().dependsOnAsMultipleCondition()).stream()
                     .map(
@@ -169,7 +185,7 @@ public class FlowTriggerService {
             .filter(Objects::nonNull)
             .toList();
 
-        return executions;
+        return Stream.concat(failedForWhenError.stream(), executions.stream()).toList();
     }
 
     private Execution processMultipleConditionWindow(TransactionContext txContext, FlowWithFlowTriggerAndMultipleCondition flowWithMultipleCondition,
@@ -181,17 +197,37 @@ public class FlowTriggerService {
         RunContext runContext = runContextFactory.of(null, execution);
 
         // evaluate multiple conditions and accumulate with previously stored results
-        Map<String, Boolean> results = flowWithMultipleCondition.getMultipleCondition()
-            .getConditions()
-            .entrySet()
-            .stream()
-            .map(
-                e -> new AbstractMap.SimpleEntry<>(
-                    e.getKey(),
-                    conditionService.isValid(e.getValue(), flowWithMultipleCondition.getFlow(), execution, runContext)
-                )
-            )
-            .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+        Map<String, Boolean> results = new HashMap<>();
+        for (Map.Entry<String, Condition> condition : flowWithMultipleCondition.getMultipleCondition().getConditions().entrySet()) {
+            boolean met;
+            try {
+                met = conditionService.isConditionMet(condition.getValue(), flowWithMultipleCondition.getFlow(), execution, runContext);
+            } catch (InternalException e) {
+                // an unrenderable dependsOn `when` is a misconfiguration: fail the execution rather than
+                // treating it as a dependency that did not match
+                return flowWithMultipleCondition.getTrigger().evaluate(
+                    Optional.empty(),
+                    runContextFactory.of(resolved, execution),
+                    resolved,
+                    execution,
+                    null,
+                    e
+                ).orElse(null);
+            } catch (RuntimeException e) {
+                // any other evaluation error is logged and treated as a non-match, never propagated
+                // (which would otherwise fail and retry the whole multiple-condition message)
+                runContext.logger().warn(
+                    "[namespace: {}] [flow: {}] [condition: {}] Evaluate Condition Failed with error '{}'",
+                    flowWithMultipleCondition.getFlow().getNamespace(),
+                    flowWithMultipleCondition.getFlow().getId(),
+                    condition.getKey(),
+                    e.getMessage(),
+                    e
+                );
+                met = false;
+            }
+            results.put(condition.getKey(), met);
+        }
 
         // merge current results into the window (with() preserves previously true results across executions)
         MultipleConditionWindow updatedWindow = multipleConditionWindow.with(results);
@@ -215,7 +251,8 @@ public class FlowTriggerService {
                 resolved,
                 execution,
                 // an execution that satisfies no condition can still fire an already satisfied window, its outputs must not leak
-                satisfiesACondition ? executionOutputs : null
+                satisfiesACondition ? executionOutputs : null,
+                null
             );
 
             return maybeExecution.orElse(null);
@@ -266,14 +303,18 @@ public class FlowTriggerService {
         return flowTriggers(flow).map(trigger -> new FlowWithFlowTrigger(flow, trigger))
             // filter on the execution state the flow listen to
             .filter(flowWithFlowTrigger -> flowWithFlowTrigger.getTrigger().getStates().contains(execution.getState().getCurrent()))
-            // validate flow triggers conditions excluding multiple conditions
-            .filter(
-                flowWithFlowTrigger -> conditionService.isValid(
-                    flowWithFlowTrigger.getTrigger(),
-                    flowWithFlowTrigger.getFlow(),
-                    runContext
-                )
-            ).toList();
+            // validate flow triggers conditions excluding multiple conditions; an unrenderable `when` is not a
+            // non-match but a misconfiguration, so it is kept and tagged to later fire a FAILED execution
+            .<FlowWithFlowTrigger>mapMulti((flowWithFlowTrigger, consumer) -> {
+                try {
+                    if (conditionService.isTriggerConditionMet(flowWithFlowTrigger.getTrigger(), runContext)) {
+                        consumer.accept(flowWithFlowTrigger);
+                    }
+                } catch (IllegalVariableEvaluationException e) {
+                    consumer.accept(new FlowWithFlowTrigger(flowWithFlowTrigger.getFlow(), flowWithFlowTrigger.getTrigger(), e));
+                }
+            })
+            .toList();
     }
 
     @AllArgsConstructor
@@ -285,11 +326,22 @@ public class FlowTriggerService {
         private final MultipleCondition multipleCondition;
     }
 
-    @AllArgsConstructor
     @Getter
     @ToString
     public static class FlowWithFlowTrigger {
         private final Flow flow;
         private final io.kestra.plugin.core.trigger.Flow trigger;
+        // the render error of the trigger `when`, when it could not be rendered; makes the trigger fire a FAILED execution
+        private final InternalException whenError;
+
+        public FlowWithFlowTrigger(Flow flow, io.kestra.plugin.core.trigger.Flow trigger) {
+            this(flow, trigger, null);
+        }
+
+        public FlowWithFlowTrigger(Flow flow, io.kestra.plugin.core.trigger.Flow trigger, InternalException whenError) {
+            this.flow = flow;
+            this.trigger = trigger;
+            this.whenError = whenError;
+        }
     }
 }

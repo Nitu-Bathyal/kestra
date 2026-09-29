@@ -72,7 +72,8 @@ class FlowTest {
             runContextFactory.of(),
             flow,
             execution,
-            Map.of()
+            Map.of(),
+            null
         );
 
         assertThat(evaluate.isPresent()).isTrue();
@@ -130,7 +131,8 @@ class FlowTest {
             runContextFactory.of(),
             flow,
             execution,
-            Map.of()
+            Map.of(),
+            null
         );
 
         assertThat(evaluate.isPresent()).isTrue();
@@ -190,7 +192,7 @@ class FlowTest {
             )
             .build();
 
-        Optional<Execution> evaluate = flowTrigger.evaluate(Optional.empty(), runContextFactory.of(), flow, execution, Map.of());
+        Optional<Execution> evaluate = flowTrigger.evaluate(Optional.empty(), runContextFactory.of(), flow, execution, Map.of(), null);
 
         assertThat(evaluate.isPresent()).isTrue();
         assertThat(evaluate.get().getLabels()).hasSize(5);
@@ -244,7 +246,8 @@ class FlowTest {
             runContextFactory.of(),
             flow,
             triggeringExecution,
-            Map.of()
+            Map.of(),
+            null
         );
 
         assertThat(evaluate.isPresent()).isTrue();
@@ -295,7 +298,8 @@ class FlowTest {
             runContextFactory.of(),
             flow,
             triggeringExecution,
-            Map.of()
+            Map.of(),
+            null
         );
 
         assertThat(evaluate.isPresent()).isTrue();

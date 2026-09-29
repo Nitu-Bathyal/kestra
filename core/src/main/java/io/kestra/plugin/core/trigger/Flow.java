@@ -53,6 +53,8 @@ import static io.kestra.core.topologies.FlowTopologyService.SIMULATED_EXECUTION;
     description = """
         Fires when upstream Flow executions meet `dependsOn` (required) and optional trigger `when` condition. Lets you chain Flows owned by different teams.
 
+        The trigger `when` and each `dependsOn` `when` are evaluated against the upstream execution: `flow` is the upstream flow (use `flow.namespace` and `flow.id`), `execution` the upstream execution (`execution.state`, `execution.namespace`, `execution.flowId`, `execution.hasRetryAttempt`), `labels` its labels and `outputs` its task outputs; its flow outputs are under `execution.outputs`.
+
         Upstream execution outputs are exposed under `trigger.outputs`; you can also pass `inputs` to the downstream Flow."""
 )
 @Plugin(
@@ -306,7 +308,7 @@ public class Flow extends AbstractTrigger implements TriggerOutput<Flow.Output> 
      *        {@link io.kestra.core.services.ExecutionOutputService}.
      */
     public Optional<Execution> evaluate(Optional<MultipleConditionWindow> multipleConditionWindow, RunContext runContext, io.kestra.core.models.flows.Flow flow, Execution current,
-        Map<String, Object> executionOutputs) {
+        Map<String, Object> executionOutputs, @Nullable InternalException conditionError) {
         Logger logger = runContext.logger();
 
         // merge outputs from all the matched executions, keeping them null when there is none so 'trigger.outputs' stays undefined
@@ -342,6 +344,20 @@ public class Flow extends AbstractTrigger implements TriggerOutput<Flow.Output> 
         // every other creation path rather than field by field, which is how flow variables went missing here
         Execution execution = Execution.newExecution(flow, labels).withTrigger(executionTrigger);
         execution = execution.withMetadata(execution.getMetadata().withExecutionDepth(current.getMetadata().executionDepthOrZero() + 1));
+
+        // a `when` that could not be rendered is a misconfiguration, not a non-match: fail the execution so it
+        // surfaces on the triggered flow
+        if (conditionError != null) {
+            logger.warn(
+                "Failed to render the `when` condition of flow trigger '{}' on flow '{}.{}': {}",
+                this.getId(),
+                flow.getNamespace(),
+                flow.getId(),
+                conditionError.getMessage(),
+                conditionError
+            );
+            return Optional.of(execution.withState(State.Type.FAILED));
+        }
 
         try {
             Map<String, Object> renderedInputs;
