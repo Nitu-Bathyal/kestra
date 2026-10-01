@@ -5554,7 +5554,9 @@ export type RestartExecutionsByIdsData = {
     };
     query?: {
         /**
-         * If latest revision should be used
+         * Deprecated, will be removed in 2.2: creates new executions on the latest revision, use replay instead.
+         *
+         * @deprecated
          */
         latestRevision?: boolean | null;
     };
@@ -5602,7 +5604,9 @@ export type RestartExecutionsByQueryData = {
          */
         filters?: Array<QueryFilter> | null;
         /**
-         * If latest revision should be used
+         * Deprecated, will be removed in 2.2: creates new executions on the latest revision, use replay instead.
+         *
+         * @deprecated
          */
         latestRevision?: boolean | null;
     };
@@ -6727,7 +6731,9 @@ export type RestartExecutionData = {
     };
     query?: {
         /**
-         * The flow revision to use for new execution
+         * Deprecated, will be removed in 2.2: creates a new execution on this revision, use replay instead.
+         *
+         * @deprecated
          */
         revision?: number | null;
     };

@@ -327,7 +327,7 @@ export const replayExecutionWithinputs = (parameters: Omit<Parameters<typeof f43
 }, options?: Omit<Parameters<typeof f43A000>[1], 'throwOnError'>) => getDataOrThrow(f43A000(addTenantToParameters(parameters), options));
 
 /**
- * Restart a new execution from an old one
+ * Restart an execution
  */
 export const restartExecution = (parameters: Omit<Parameters<typeof _06Fa01237>[0], 'tenant'> & {
     tenant?: string;
